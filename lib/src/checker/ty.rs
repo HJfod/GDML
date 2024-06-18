@@ -3,6 +3,8 @@ use std::fmt::Display;
 use crate::ice;
 use crate::shared::src::ArcSpan;
 
+use super::path::Ident;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty {
     /// The type of a variable whose real type has not yet been inferred
@@ -24,7 +26,7 @@ pub enum Ty {
     String,
     /// Function type
     Function {
-        params: Vec<(Option<String>, Ty)>,
+        params: Vec<(Option<Ident>, Ty, ArcSpan)>,
         ret_ty: Box<Ty>,
     },
     /// Optional type
@@ -33,14 +35,14 @@ pub enum Ty {
     },
     /// Alias for another type. Can be implicitly converted to the other type
     Alias {
-        name: String,
+        name: Ident,
         ty: Box<Ty>,
         decl_span: ArcSpan,
     },
     /// A "new type" alias for another type; in other words, can *not* be 
     /// implicitly converted to the other type
     Named {
-        name: String,
+        name: Ident,
         ty: Box<Ty>,
         decl_span: ArcSpan,
     },
@@ -125,7 +127,7 @@ impl Display for Ty {
             Self::Function { params, ret_ty } => write!(
                 f,
                 "fun({}) -> {ret_ty}", params.iter()
-                    .map(|(p, t)| if let Some(p) = p {
+                    .map(|(p, t, _)| if let Some(p) = p {
                         format!("{p}: {t}")
                     }
                     else {

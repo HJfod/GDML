@@ -1,16 +1,15 @@
 
 use std::fmt::Display;
-
-use crate::ast::token::op;
-
 use super::ty::Ty;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ident {
     Name(String),
     Decorator(String),
-    UnOp(op::UnaryOp, Ty),
-    BinOp(Ty, op::BinaryOp, Ty),
+    /// For function types
+    Function(String),
+    UnOp(op::UnaryOp, Box<Ty>),
+    BinOp(Box<Ty>, op::BinaryOp, Box<Ty>),
 }
 
 impl From<&str> for Ident {
@@ -35,6 +34,7 @@ impl Display for Ident {
         match self {
             Self::Name(name) => write!(f, "{name}"),
             Self::Decorator(name) => write!(f, "@{name}"),
+            Self::Function(name) => write!(f, "fun`{name}`"),
             Self::UnOp(op, t) => write!(f, "unop`{op}{t}`"),
             Self::BinOp(a, op, b) => write!(f, "binop`{a}{op}{b}`"),
         }
@@ -70,6 +70,9 @@ impl IdentPath {
     }
     pub fn is_absolute(&self) -> bool {
         self.absolute
+    }
+    pub fn ident(&self) -> Ident {
+        self.components.last().unwrap().clone()
     }
 }
 

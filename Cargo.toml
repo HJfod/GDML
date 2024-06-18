@@ -1,4 +1,4 @@
 
 [workspace]
-members = ["cli", "compiler"]
+members = ["cli", "lib", "compiler"]
 resolver = "2"

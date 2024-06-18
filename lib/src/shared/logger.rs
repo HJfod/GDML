@@ -76,7 +76,7 @@ impl<'s> Note<'s> {
     }
 }
 
-impl Display for Note<'_> {
+impl<'s> Display for Note<'s> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(ref span) = self.at {
             write!(
@@ -114,7 +114,7 @@ impl<'s> Message<'s> {
     }
 }
 
-impl Display for Message<'_> {
+impl<'s> Display for Message<'s> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // todo: migrate to https://crates.io/crates/lyneate mayhaps
 

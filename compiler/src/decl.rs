@@ -2,7 +2,7 @@
 use crate::{
     parser::parse::{SeparatedWithTrailing, DontExpect, Node, NodePool},
     add_compile_message,
-    checker::{resolve::{ResolveNode, ResolveRef}, coherency::{Checker, ScopeID}, ty::Ty, entity::Entity, path},
+    checker::{resolve::{ResolveNode, ResolveRef}, coherency::{Checker, ScopeID, ScopeLevel}, ty::Ty, entity::Entity, path},
     shared::{src::ArcSpan, logger::{Message, Level, Note}}, try_resolve_ref
 };
 use super::{token::{kw, op, punct, delim, Ident}, ty::TypeExpr, expr::{Expr, IdentPath, ExprList}};
@@ -82,61 +82,84 @@ pub struct FunDeclNode {
     body: delim::Braced<ExprList>,
     #[parse(skip)]
     scope: Option<ScopeID>,
+    #[parse(skip)]
+    resolved_fun_ty: Option<Ty>,
 }
 
 impl ResolveNode for FunDeclNode {
     fn try_resolve_node(&mut self, pool: &NodePool, checker: &mut Checker) -> Option<Ty> {
-        let mut params = Vec::new();
-        for param in self.params.get(pool).value.iter() {
-            match *param.get(pool) {
-                FunParamNode::NamedParam { name, ty, default_value } => {
-                    let span = param.get(pool).span(pool);
-                    let ty = ty.1.try_resolve_ref(pool, checker)?;
-                    let v = try_resolve_ref!(default_value, (pool, checker), Some((_, ty)) => ty);
-                    checker.expect_ty_eq(ty.clone(), v, span.clone());
-                    params.push((name.get(pool).to_string(), ty, span.unwrap_or(ArcSpan::builtin())));
+        if self.resolved_fun_ty.is_none() {
+            let mut params = Vec::new();
+            for param in self.params.get(pool).value.iter() {
+                match *param.get(pool) {
+                    FunParamNode::NamedParam { name, ty, default_value } => {
+                        let span = param.get(pool).span(pool);
+                        let ty = ty.1.try_resolve_ref(pool, checker)?;
+                        let v = try_resolve_ref!(default_value, (pool, checker), Some((_, ty)) => ty);
+                        checker.expect_ty_eq(ty.clone(), v, span.clone());
+                        params.push((
+                            Some(path::Ident::Name(name.get(pool).to_string())),
+                            ty,
+                            span.unwrap_or(ArcSpan::builtin())
+                        ));
+                    }
+                    FunParamNode::ThisParam { this_kw: _, ty, _invalid_value: _ } => todo!()
                 }
-                FunParamNode::ThisParam { this_kw: _, ty, _invalid_value: _ } => todo!()
             }
-        }
-        let ret_ty = try_resolve_ref!(self.ret_ty, (pool, checker), Some((_, ty)) => ty);
-        let body = {
-            let _scope = checker.enter_scope(&mut self.scope);
-            for (name, ty, span) in &params {
+            let ret_ty = try_resolve_ref!(self.ret_ty, (pool, checker), Some((_, ty)) => ty);
+
+            let fty = Ty::Function {
+                params: params.clone(),
+                ret_ty: ret_ty.clone().into(),
+            };
+            if let Some(ref name) = self.name.as_ref().map(|n| n.get(pool).to_path(pool)) {
                 if let Err(old) = checker.scope().entities_mut().try_push(
-                    &path::IdentPath::new([path::Ident::from(name.as_str())], false),
+                    name,
+                    Entity::new(
+                        Ty::Named {
+                            name: name.ident(),
+                            ty: fty.clone().into(),
+                            decl_span: self.span_or_builtin(pool),
+                        },
+                        self.span_or_builtin(pool),
+                        false
+                    )
+                ) {
+                    let old_span = old.span();
+                    checker.logger().lock().unwrap().log(Message::new(
+                        Level::Error,
+                        format!("Name {} has already been defined", name),
+                        self.span_or_builtin(pool).as_ref()
+                    ).note(Note::new_at("Previous definition here", old_span.as_ref())));
+                }
+            }
+            self.resolved_fun_ty = Some(fty);
+        }
+        
+        let Some(Ty::Function { ref params, ref ret_ty }) = self.resolved_fun_ty else {
+            unreachable!();
+        };
+        let body = {
+            let _scope = checker.enter_scope(&mut self.scope, ScopeLevel::Function);
+            for (name, ty, span) in params {
+                if let Err(old) = checker.scope().entities_mut().try_push(
+                    &path::IdentPath::new([name.clone().unwrap()], false),
                     Entity::new(ty.clone(), self.span_or_builtin(pool), true)
                 ) {
                     let old_span = old.span();
                     checker.logger().lock().unwrap().log(Message::new(
                         Level::Error,
-                        format!("Parameter {name} defined multiple times"),
+                        format!("Parameter {} defined multiple times", name.as_ref().unwrap()),
                         span.as_ref()
                     ).note(Note::new_at("Previous definition here", old_span.as_ref())));
                 }
             }
             self.body.try_resolve_ref(pool, checker)?
         };
-        checker.expect_ty_eq(ret_ty.clone(), body.clone(), self.body.get(pool).span(pool));
+        checker.expect_ty_eq(*ret_ty.clone(), body.clone(), self.body.get(pool).span(pool));
 
-        let fty = Ty::Function {
-            params: params.into_iter().map(|p| (Some(p.0), p.1)).collect(),
-            ret_ty: ret_ty.into(),
-        };
-        if let Some(ref name) = self.name.as_ref().map(|n| n.get(pool).to_path(pool)) {
-            if let Err(old) = checker.scope().entities_mut().try_push(
-                name,
-                Entity::new(fty.clone(), self.span_or_builtin(pool), false)
-            ) {
-                let old_span = old.span();
-                checker.logger().lock().unwrap().log(Message::new(
-                    Level::Error,
-                    format!("Name {} has already been defined", name),
-                    self.span_or_builtin(pool).as_ref()
-                ).note(Note::new_at("Previous definition here", old_span.as_ref())));
-            }
-        }
-        Some(fty)
+        // Return Void if this is a named function, i.e. produces an Entity
+        Some(if self.name.is_some() { Ty::Void } else { self.resolved_fun_ty.clone().unwrap() })
     }
 }
 

@@ -58,7 +58,7 @@ impl ResolveNode for CallNode {
                     (None, value.try_resolve_ref(pool, checker), value.get(pool).span(pool))
                 }
                 ArgNode::Named(name, _, value) => {
-                    (Some(name.get(pool).to_string()), value.try_resolve_ref(pool, checker), value.get(pool).span(pool))
+                    (Some(name.get(pool).to_ident()), value.try_resolve_ref(pool, checker), value.get(pool).span(pool))
                 }
             })
             .map(|(a, e, s)| e.map(|e| (a, e, s)))
@@ -67,7 +67,7 @@ impl ResolveNode for CallNode {
             Ty::Function { params, ret_ty } => {
                 let mut arg_ix = 0usize;
                 let mut encountered_named = None;
-                let mut passed: HashMap<String, ArcSpan> = HashMap::new();
+                let mut passed: HashMap<path::Ident, ArcSpan> = HashMap::new();
                 for (name, ty, span) in &args {
                     if let Some(name) = name {
                         encountered_named = Some(span.clone());
@@ -84,7 +84,7 @@ impl ResolveNode for CallNode {
                             }
                             None => {
                                 match params.iter().find(|p| p.0.as_ref() == Some(name)) {
-                                    Some((_, pty)) => {
+                                    Some((_, pty, _)) => {
                                         checker.expect_ty_eq(ty.clone(), pty.clone(), span.clone());
                                     }
                                     None => {
@@ -114,7 +114,7 @@ impl ResolveNode for CallNode {
                             }
                             None => {
                                 match params.get(arg_ix) {
-                                    Some((name, pty)) => {
+                                    Some((name, pty, _)) => {
                                         if let Some(name) = name {
                                             passed.insert(name.clone(), span.clone().unwrap_or(ArcSpan::builtin()));
                                         }
@@ -234,8 +234,16 @@ impl ResolveNode for UnOpNode {
             return Some(Ty::Invalid);
         }
         for scope in checker.scopes() {
-            let name = path::IdentPath::new([path::Ident::UnOp(op.op(), target.clone())], false);
+            let name = path::IdentPath::new(
+                [path::Ident::UnOp(op.op(), target.clone().into())],
+                false
+            );
             if let Some(fun) = scope.entities().find(&name) {
+                // Do not accept ephemeral entities (even though it should be 
+                // impossible to define an ephemeral entity with an unop name)
+                if fun.ephemeral() {
+                    continue;
+                }
                 match fun.ty() {
                     Ty::Function { params: _, ret_ty } => return Some(ret_ty.as_ref().clone()),
                     _ => ice!(
@@ -306,10 +314,16 @@ impl ResolveNode for BinOpNode {
         for scope in checker.scopes() {
             // todo: handle symmetrive ops, like a + b <=> b + a
             // todo: synthesize ops, like a == b <=> a != b
-            let name = path::IdentPath::new([
-                path::Ident::BinOp(a.clone(), op.op(), b.clone())
-            ], false);
+            let name = path::IdentPath::new(
+                [path::Ident::BinOp(a.clone().into(), op.op(), b.clone().into())],
+                false
+            );
             if let Some(fun) = scope.entities().find(&name) {
+                // Do not accept ephemeral entities (even though it should be 
+                // impossible to define an ephemeral entity with a binop name)
+                if fun.ephemeral() {
+                    continue;
+                }
                 match fun.ty() {
                     Ty::Function { params: _, ret_ty } => return Some(ret_ty.as_ref().clone()),
                     _ => ice!(

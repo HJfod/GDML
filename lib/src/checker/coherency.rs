@@ -2,7 +2,6 @@
 use std::collections::HashMap;
 use crate::{
     shared::{logger::{LoggerRef, Message, Level, Note}, src::{ArcSpan, Span}},
-    ast::token::op,
     parser::parse::NodePool,
     checker::resolve::ResolveRef
 };
@@ -97,17 +96,29 @@ impl<'s, T> ItemSpaceWithStackMut<'s, T> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ScopeLevel {
+    /// Normal block scope. Part of normal control flow; variables from outer 
+    /// scopes may be used normally
+    Block,
+    /// Function scope - only non-ephemeral items from outer scopes are 
+    /// available
+    Function,
+}
+
 #[derive(Debug)]
 struct Scope {
     parent: Option<ScopeID>,
+    level: ScopeLevel,
     types: ItemSpace<Ty>,
     entities: ItemSpace<Entity>,
 }
 
 impl Scope {
-    fn new(parent: ScopeID) -> Self {
+    fn new(parent: ScopeID, level: ScopeLevel) -> Self {
         Self {
             parent: Some(parent),
+            level,
             types: Default::default(),
             entities: Default::default(),
         }
@@ -121,6 +132,7 @@ impl Scope {
 
         Self {
             parent: None,
+            level: ScopeLevel::Block,
             types: ItemSpace::new(
                 [Ty::Never, Ty::Void, Ty::Bool, Ty::Int, Ty::Float, Ty::String]
                     .map(|t| (FullIdentPath::new([t.to_string().into()]), t))
@@ -167,10 +179,10 @@ impl Scope {
                     decl_binop!(Bool Or Bool => Bool),
                 ]
                 .map(|(a, op, b, ret)| (
-                    FullIdentPath::new([Ident::BinOp(a.clone(), op, b.clone())]),
+                    FullIdentPath::new([Ident::BinOp(a.clone().into(), op, b.clone().into())]),
                     Entity::new(
                         Ty::Function {
-                            params: vec![(None, a), (None, b)],
+                            params: vec![(None, a, ArcSpan::builtin()), (None, b, ArcSpan::builtin())],
                             ret_ty: Box::from(ret)
                         },
                         ArcSpan::builtin(),
@@ -181,7 +193,7 @@ impl Scope {
         }
     }
     fn drop_ephemeral(&mut self) {
-        self.entities.items.retain(|_, v| !v.ephemeral());
+        self.entities.items.iter_mut().for_each(|e| e.1.undefine_if_ephemeral());
     }
 }
 
@@ -197,6 +209,12 @@ impl<'s> ScopeWithStack<'s> {
     }
     pub fn entities(&self) -> ItemSpaceWithStack<'s, Entity> {
         ItemSpaceWithStack { space: &self.scope.entities, stack: self.stack }
+    }
+    pub fn is_root(&self) -> bool {
+        self.scope.parent.is_none()
+    }
+    pub fn level(&self) -> ScopeLevel {
+        self.scope.level
     }
 }
 
@@ -222,6 +240,12 @@ impl<'s> ScopeWithStackMut<'s> {
     }
     pub fn entities_mut(self) -> ItemSpaceWithStackMut<'s, Entity> {
         ItemSpaceWithStackMut { space: &mut self.scope.entities, stack: self.stack }
+    }
+    pub fn is_root(&self) -> bool {
+        self.scope.parent.is_none()
+    }
+    pub fn level(&self) -> ScopeLevel {
+        self.scope.level
     }
 }
 
@@ -316,12 +340,16 @@ impl Checker {
             stack: &self.namespace_stack
         }
     }
-    pub fn enter_scope(&mut self, scope: &mut Option<ScopeID>) -> LeaveScope {
+    pub fn enter_scope(
+        &mut self,
+        scope: &mut Option<ScopeID>,
+        level: ScopeLevel
+    ) -> LeaveScope {
         match scope {
             Some(scope) => self.current_scope = *scope,
             None => {
                 *scope = Some(ScopeID(self.scopes.len()));
-                self.scopes.push(Scope::new(self.current_scope));
+                self.scopes.push(Scope::new(self.current_scope, level));
                 self.current_scope = scope.unwrap();
             }
         }

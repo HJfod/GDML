@@ -1,16 +1,15 @@
 
-use std::{sync::Arc, marker::PhantomData, cell::RefCell};
+use std::{marker::PhantomData, cell::RefCell};
 use crate::{
-    shared::{src::{Src, ArcSpan}, logger::LoggerRef},
-    checker::{resolve::{ResolveRef, ResolveNode}, coherency::Checker, ty::Ty}
+    checker::{coherency::Checker, resolve::{ResolveNode, ResolveRef}, ty::Ty}, shared::{logger::LoggerRef, src::Span}
 };
-use super::tokenizer::TokenIterator;
 use as_any::AsAny;
 
-pub fn calculate_span<S: IntoIterator<Item = Option<ArcSpan>>>(spans: S) -> Option<ArcSpan> {
+/// Get the total span of a bunch of spans
+pub fn overall_span<'s, S: IntoIterator<Item = Option<Span<'s>>>>(spans: S) -> Option<Span<'s>> {
     let mut filtered = spans.into_iter().flatten();
     let mut span = filtered.next()?;
-    for ArcSpan(_, range) in filtered {
+    for Span(_, range) in filtered {
         if range.start < span.1.start {
             span.1.start = range.start;
         }
@@ -21,23 +20,6 @@ pub fn calculate_span<S: IntoIterator<Item = Option<ArcSpan>>>(spans: S) -> Opti
     Some(span.clone())
 }
 
-pub trait CompileMessage: 'static {
-    fn get_msg() -> &'static str;
-}
-
-#[macro_export]
-macro_rules! add_compile_message {
-    ($ident: ident: $msg: literal) => {
-        #[derive(Debug)]
-        pub struct $ident;
-        impl $crate::parser::parse::CompileMessage for $ident {
-            fn get_msg() -> &'static str {
-                $msg
-            }
-        }
-    };
-}
-
 pub struct FatalParseError;
 
 // There are two types of AST items: Nodes and Refs
@@ -45,13 +27,13 @@ pub struct FatalParseError;
 // A Node can contain as fields any state as well as Refs to other Nodes, which 
 // are considered its children
 
-/// A Node that is allocated on the NodePool
-pub trait Node: AsAny {
+/// An AST node
+pub trait Node {
     /// Get the children of this Node
     fn children(&self) -> Vec<&dyn ResolveRef>;
 
     /// Get the span of this Node
-    fn span(&self, pool: &NodePool) -> Option<ArcSpan> {
+    fn span(&self, pool: &NodePool) -> Option<Span> {
         calculate_span(
             self.children().into_iter()
                 .flat_map(|c| c.ids())
@@ -59,8 +41,8 @@ pub trait Node: AsAny {
         )
     }
 
-    fn span_or_builtin(&self, pool: &NodePool) -> ArcSpan {
-        self.span(pool).unwrap_or(ArcSpan::builtin())
+    fn span_or_builtin(&self, pool: &NodePool) -> Span {
+        self.span(pool).unwrap_or(Span::builtin())
     }
 }
 
@@ -68,7 +50,7 @@ pub trait ParseNode: Node + Sized {
     /// Parse this node and add it to the NodePool, returning its ID in the pool
     fn parse_node(
         pool: &mut NodePool,
-        src: Arc<Src>,
+        src: SrcRef,
         tokenizer: &mut TokenIterator
     ) -> Result<NodeID, FatalParseError>;
 
@@ -85,7 +67,7 @@ pub trait Ref: 'static {
 pub trait ParseRef: Ref + Sized {
     /// Parse this type from the token stream, allocating the node on the 
     /// NodePool and bringing back a reference to it
-    fn parse_ref(pool: &mut NodePool, src: Arc<Src>, tokenizer: &mut TokenIterator) -> Result<Self, FatalParseError>;
+    fn parse_ref(pool: &mut NodePool, src: SrcRef, tokenizer: &mut TokenIterator) -> Result<Self, FatalParseError>;
         
     /// Check if this type is coming up on the token stream at a position
     fn peek(pos: usize, tokenizer: &TokenIterator) -> bool;
@@ -94,7 +76,7 @@ pub trait ParseRef: Ref + Sized {
     /// then attempt to parse it on the stream
     fn peek_and_parse(
         list: &mut NodePool,
-        src: Arc<Src>,
+        src: SrcRef,
         tokenizer: &mut TokenIterator
     ) -> Result<Option<Self>, FatalParseError> {
         if Self::peek(0, tokenizer) {
@@ -109,7 +91,7 @@ pub trait ParseRef: Ref + Sized {
     /// stream couldn't be matched
     fn parse_complete<'s, Tk>(
         list: &mut NodePool,
-        src: Arc<Src>,
+        src: SrcRef,
         tokenizer: Tk
     ) -> Result<Self, FatalParseError>
         where Tk: Into<TokenIterator<'s>>
@@ -126,11 +108,11 @@ pub trait ParseRef: Ref + Sized {
 }
 
 pub trait ParseNodeFn: FnMut(
-    &mut NodePool, Arc<Src>, &mut TokenIterator
+    &mut NodePool, SrcRef, &mut TokenIterator
 ) -> Result<NodeID, FatalParseError> {}
 
 impl<F> ParseNodeFn for F
-    where F: FnMut(&mut NodePool, Arc<Src>, &mut TokenIterator) -> Result<NodeID, FatalParseError>
+    where F: FnMut(&mut NodePool, SrcRef, &mut TokenIterator) -> Result<NodeID, FatalParseError>
 {}
 
 // Ref can be implemented on a bunch of type like Vec<T>, Option<T>, etc.
@@ -150,7 +132,7 @@ macro_rules! impl_tuple_parse {
         impl<$a: ParseRef, $($r: ParseRef),*> ParseRef for ($a, $($r),*) {
             fn parse_ref(
                 pool: &mut NodePool,
-                src: Arc<Src>,
+                src: SrcRef,
                 tokenizer: &mut TokenIterator
             ) -> Result<Self, FatalParseError> {
                 Ok((
@@ -207,7 +189,7 @@ impl_tuple_parse!(A; B; C; D; E);
 // }
 
 // impl<T: Parse> Parse for Box<T> {
-//     fn parse(list: &mut NodeList, src: Arc<Src>, tokenizer: &mut TokenIterator) -> Result<Self, FatalParseError> {
+//     fn parse(list: &mut NodeList, src: SrcRef, tokenizer: &mut TokenIterator) -> Result<Self, FatalParseError> {
 //         T::parse(list, src, tokenizer).map(Box::from)
 //     }
 //     fn peek(pos: usize, tokenizer: &TokenIterator) -> bool {
@@ -222,7 +204,7 @@ impl<T: Ref> Ref for Option<T> {
 }
 
 impl<T: ParseRef> ParseRef for Option<T> {
-    fn parse_ref(pool: &mut NodePool, src: Arc<Src>, tokenizer: &mut TokenIterator) -> Result<Self, FatalParseError> {
+    fn parse_ref(pool: &mut NodePool, src: SrcRef, tokenizer: &mut TokenIterator) -> Result<Self, FatalParseError> {
         if Self::peek(0, tokenizer) {
             Ok(Some(T::parse_ref(pool, src, tokenizer)?))
         }
@@ -248,7 +230,7 @@ impl<T: Ref> Ref for Vec<T> {
 }
 
 impl<T: ParseRef> ParseRef for Vec<T> {
-    fn parse_ref(pool: &mut NodePool, src: Arc<Src>, tokenizer: &mut TokenIterator) -> Result<Self, FatalParseError> {
+    fn parse_ref(pool: &mut NodePool, src: SrcRef, tokenizer: &mut TokenIterator) -> Result<Self, FatalParseError> {
         let mut res = Vec::new();
         while let Some(t) = T::peek_and_parse(pool, src.clone(), tokenizer)? {
             res.push(t);
@@ -297,7 +279,7 @@ impl<T: Ref, S: Ref> Ref for Separated<T, S> {
 }
 
 impl<T: ParseRef, S: ParseRef> ParseRef for Separated<T, S> {
-    fn parse_ref(pool: &mut NodePool, src: Arc<Src>, tokenizer: &mut TokenIterator) -> Result<Self, FatalParseError> {
+    fn parse_ref(pool: &mut NodePool, src: SrcRef, tokenizer: &mut TokenIterator) -> Result<Self, FatalParseError> {
         let mut items = Vec::from([T::parse_ref(pool, src.clone(), tokenizer)?]);
         while S::peek_and_parse(pool, src.clone(), tokenizer)?.is_some() {
             items.push(T::parse_ref(pool, src.clone(), tokenizer)?);
@@ -340,7 +322,7 @@ impl<T: Ref, S: Ref> Ref for SeparatedWithTrailing<T, S> {
 }
 
 impl<T: ParseRef, S: ParseRef> ParseRef for SeparatedWithTrailing<T, S> {
-    fn parse_ref(pool: &mut NodePool, src: Arc<Src>, tokenizer: &mut TokenIterator) -> Result<Self, FatalParseError> {
+    fn parse_ref(pool: &mut NodePool, src: SrcRef, tokenizer: &mut TokenIterator) -> Result<Self, FatalParseError> {
         let mut items = Vec::from([T::parse_ref(pool, src.clone(), tokenizer)?]);
         let mut trailing = None;
         while let Some(sep) = S::peek_and_parse(pool, src.clone(), tokenizer)? {
@@ -375,7 +357,7 @@ impl<T: Ref, M: CompileMessage> Ref for DontExpect<T, M> {
 }
 
 impl<T: ParseRef, M: CompileMessage> ParseRef for DontExpect<T, M> {
-    fn parse_ref(list: &mut NodePool, src: Arc<Src>, tokenizer: &mut TokenIterator) -> Result<Self, FatalParseError> {
+    fn parse_ref(list: &mut NodePool, src: SrcRef, tokenizer: &mut TokenIterator) -> Result<Self, FatalParseError> {
         if T::peek_and_parse(list, src, tokenizer)?.is_some() {
             tokenizer.error(M::get_msg())
         }
@@ -523,7 +505,7 @@ impl<T: ResolveNode> Ref for RefToNode<T> {
 }
 
 impl<T: ResolveNode + ParseNode> ParseRef for RefToNode<T> {
-    fn parse_ref(list: &mut NodePool, src: Arc<Src>, tokenizer: &mut TokenIterator) -> Result<Self, FatalParseError> {
+    fn parse_ref(list: &mut NodePool, src: SrcRef, tokenizer: &mut TokenIterator) -> Result<Self, FatalParseError> {
         Ok(Self(T::parse_node(list, src, tokenizer)?, PhantomData))
     }
     fn peek(pos: usize, tokenizer: &TokenIterator) -> bool {

@@ -1,10 +1,71 @@
 
 use std::fmt::Display;
-
 use dash_macros::token;
+use crate::checker::path;
+
+enum DashLangToken {
+    Ident,
+    // Keywords
+    Let, Fun,
+    If, Else,
+    This,
+    Return,
+    Using,
+    Void, True, False,
+    // Punctuation
+    Comma, Semicolon, Colon, Namespace,
+    Arrow, FatArrow,
+    At,
+    // Literals
+    Int(i64),
+    Float(f64),
+    String(String),
+    // Delimiters
+    Parenthesized(TokenTree),
+    Bracketed(TokenTree),
+    Braced(TokenTree),
+}
+
+define_dash_tokens! {
+    enum DashLangToken {
+        words {
+            "let", "fun",
+            "if", "else",
+            "this",
+            "return",
+            "using",
+            "get", "set",
+            "void", "true", "false",
+            ",", ";", ":",
+        }
+        reserved {}
+        literals {
+            Int(i64),
+            Float(f64),
+            String(String),
+        }
+        delim {
+            "(" ... ")",
+            "[" ... "]",
+            "{" ... "}",
+        }
+    }
+}
+
+impl ResolveNode for VoidNode {
+    fn try_resolve_node(&mut self, _: &NodePool, _: &mut Checker) -> Option<Ty> {
+        Some(Ty::Void)
+    }
+}
 
 #[token(kind = "Ident", include_raw)]
 pub struct Ident {}
+
+impl IdentNode {
+    pub fn to_ident(&self) -> path::Ident {
+        path::Ident::Name(self.raw.clone())
+    }
+}
 
 impl Display for IdentNode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -45,9 +106,6 @@ pub(crate) mod lit {
     pub struct Void {}
 
     impl ResolveNode for VoidNode {
-        fn try_resolve_node(&mut self, _: &NodePool, _: &mut Checker) -> Option<Ty> {
-            Some(Ty::Void)
-        }
     }
 
     #[token(kind = "Keyword", raw = "true")]

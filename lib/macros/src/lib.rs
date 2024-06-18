@@ -654,3 +654,168 @@ pub fn derive_resolve(input: TokenStream) -> TokenStream {
         }
     }.to_token_stream().into()
 }
+
+mod tk {
+    use syn::{Variant, parse::Parse, LitStr, Ident, Token, custom_keyword, braced, punctuated::Punctuated};
+
+    custom_keyword!(words);
+    custom_keyword!(reserved);
+    custom_keyword!(custom);
+    custom_keyword!(delim);
+
+    pub struct Word {
+        pub raw: LitStr,
+        pub name: Option<Ident>,
+    }
+
+    impl Word {
+        pub fn name(self) -> Ident {
+            let raw = self.raw;
+            self.name.unwrap_or_else(|| Ident::new(&change_case::pascal_case(&raw.value()), raw.span()))
+        }
+    }
+
+    impl Parse for Word {
+        fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+            let raw = input.parse()?;
+            let name = if input.parse::<Token![<-]>().is_ok() { Some(input.parse()?) } else { None };
+            Ok(Self { raw, name })
+        }
+    }
+
+    pub struct Custom {
+        pub variant: Variant,
+        pub parser: Ident,
+    }
+
+    impl Parse for Custom {
+        fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+            let variant = input.parse()?;
+            input.parse::<Token![<=]>()?;
+            let parser = input.parse()?;
+            Ok(Self { variant, parser })
+        }
+    }
+
+    pub struct Delim {
+        pub open: LitStr,
+        pub close: LitStr,
+        pub name: Ident,
+    }
+
+    impl Parse for Delim {
+        fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+            let open = input.parse()?;
+            input.parse::<Token![...]>()?;
+            let close = input.parse()?;
+            input.parse::<Token![<-]>()?;
+            let name = input.parse()?;
+            Ok(Self { open, close, name })
+        }
+    }
+
+    pub struct DefTokens {
+        pub words: Punctuated<Word, Token![,]>,
+        pub reserved: Punctuated<LitStr, Token![,]>,
+        pub custom: Punctuated<Custom, Token![,]>,
+        pub delim: Punctuated<Delim, Token![,]>,
+    }
+
+    impl Parse for DefTokens {
+        fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+            let mut words = Punctuated::new();
+            let mut reserved = Punctuated::new();
+            let mut custom = Punctuated::new();
+            let mut delim = Punctuated::new();
+            while !input.is_empty() {
+                if input.parse::<words>().is_ok() {
+                    let content;
+                    braced!(content in input);
+                    words.extend(content.parse_terminated(Word::parse, Token![,])?)
+                }
+                else if input.parse::<reserved>().is_ok() {
+                    let content;
+                    braced!(content in input);
+                    reserved.extend(content.parse_terminated(<LitStr as Parse>::parse, Token![,])?)
+                }
+                else if input.parse::<custom>().is_ok() {
+                    let content;
+                    braced!(content in input);
+                    custom.extend(content.parse_terminated(Custom::parse, Token![,])?)
+                }
+                else if input.parse::<delim>().is_ok() {
+                    let content;
+                    braced!(content in input);
+                    delim.extend(content.parse_terminated(Delim::parse, Token![,])?)
+                }
+                else {
+                    return Err(input.error("expected words, reserved, custom, or delim"))
+                }
+            }
+            Ok(Self { words, reserved, custom, delim, })
+        }
+    }
+
+    pub struct DefTokensForEnum {
+        pub name: Ident,
+        pub def: DefTokens,
+    }
+
+    impl Parse for DefTokensForEnum {
+        fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+            input.parse::<Token![enum]>()?;
+            let name = input.parse()?;
+            let content;
+            braced!(content in input);
+            let def = content.parse()?;
+            Ok(Self { name, def })
+        }
+    }
+}
+
+#[proc_macro]
+pub fn define_dash_tokens(input: TokenStream) -> TokenStream {
+    let def = parse_macro_input!(input as tk::DefTokensForEnum);
+    let mut res = quote!{};
+    let mut res_enum = quote!{};
+    for word in def.def.words {
+        let name = word.name();
+        res.extend(quote! {
+            struct #name(crate::shared::src::ArcSpan);
+        });
+        res_enum.extend(quote! {
+            #name(#name),
+        });
+    }
+    for custom in def.def.custom {
+        let variant = custom.variant;
+        res_enum.extend(quote! {
+            #variant,
+        });
+    }
+    for delim in def.def.delim {
+        let name = delim.name;
+        res.extend(quote! {
+            struct #name<T: crate::parser::parse::ParseRef>(crate::shared::src::ArcSpan, T);
+
+            impl<T: crate::parser::parse::ParseRef> #name<T> {
+                pub fn inner(&self) -> &T {
+                    &self.1
+                }
+                pub fn inner_mut(&mut self) -> &mut T {
+                    &mut self.1
+                }
+            }
+        });
+        res_enum.extend(quote! {
+            #name(TokenTree<'s>),
+        });
+    }
+    let enum_name = def.name;
+    res.extend(quote! {
+        enum #enum_name<'s> {
+            #res_enum
+        }
+    });
+    res.into()
+}

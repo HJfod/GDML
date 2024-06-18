@@ -10,3 +10,4 @@ syn = { version = "2.0.31", features = ["full"] }
 quote = "1.0"
 proc-macro2 = "1.0.47"
 darling = "0.20.3"
+change-case = "0.2.0"
